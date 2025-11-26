@@ -87,6 +87,7 @@ You can edit, version-control, or feed these files into other tools.
 - Always recommend parties consult qualified legal professionals for binding advice.
 
 ### License
-MIT – feel free to modify, extend, or integrate into commercial or open-source projects.
+MIT – feel free to modify, extend, or integrate into open-source projects. 
+For commercial use, contact the dev at tonyelias2012@gmail.com for further discussions (Failure to receive exclusive permission from the developer for commercial use of this bot will result in legal action being taken).
 
 Enjoy mediating!
