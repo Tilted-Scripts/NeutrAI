@@ -15,7 +15,7 @@ Perfect for quick testing, demos, dispute-resolution prototypes, or integration 
 
 ### Requirements
 ```bash
-pip install openai tenacity
+pip install openai tenacity rich
 ```
 
 ### Quick Start
