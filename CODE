@@ -3,13 +3,11 @@
 mediator_bot.py
 
 A professional, interactive CLI legal mediator bot compatible with xAI's Grok API.
-
 Features:
+- REAL-TIME WEB SEARCH via DuckDuckGo (Tool Use / Function Calling).
 - Markdown rendering for clear, structured legal guidance.
-- Visual feedback (spinners, colors) for a better UX.
 - Robust session management (Save/Load/Autosave).
 - In-chat commands (/save, /undo, /quit).
-- Retry logic for network resilience.
 
 Usage:
   python mediator_bot.py
@@ -37,9 +35,10 @@ try:
     from rich.prompt import Prompt
     from rich.logging import RichHandler
     from rich.progress import Progress, SpinnerColumn, TextColumn
+    from duckduckgo_search import DDGS
 except ImportError as e:
     print(f"Missing dependency: {e.name}")
-    print("Please run: pip install openai tenacity rich")
+    print("Please run: pip install openai tenacity rich duckduckgo-search")
     sys.exit(1)
 
 # --- Configuration & Logging ---
@@ -58,6 +57,9 @@ SYSTEM_PROMPT = {
         "You are an impartial legal mediator AI. Your goal is to help resolve disputes fairly and neutrally. "
         "Listen to both parties, ask clarifying questions if needed, and suggest balanced resolutions based on "
         "common legal principles (e.g., contract law, fairness, compromise). "
+        "If specific local laws, recent statutes, or jurisdiction-specific nuances are mentioned (e.g., 'Florida alimony caps'), "
+        "YOU MUST USE THE 'web_search' TOOL to verify current information before answering. "
+        "Do not guess on specific statutes.\n"
         "Formatting instructions:\n"
         "- Use Markdown headers for main points.\n"
         "- Use bullet points for lists.\n"
@@ -66,13 +68,35 @@ SYSTEM_PROMPT = {
     ),
 }
 
+# --- Tool Definitions ---
+
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Search the internet for current legal statutes, case law summaries, or jurisdiction-specific rules.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query (e.g. 'Florida Statute 61.075 equitable distribution 2024')."
+                    }
+                },
+                "required": ["query"],
+            },
+        },
+    }
+]
+
 # --- The Mediator Class ---
 
 class MediatorBot:
     def __init__(self, args: argparse.Namespace):
         self.args = args
         self.console = Console()
-        self.messages: List[Dict[str, str]] = []
+        self.messages: List[Dict[str, Any]] = []
         self.client = self._build_client()
         self.current_speaker = "Party A"
 
@@ -82,7 +106,6 @@ class MediatorBot:
         if not api_key:
             self.console.print(f"[bold red]Error:[/bold red] {ENV_API_KEY} not found in environment or arguments.")
             sys.exit(1)
-        
         return openai.OpenAI(api_key=api_key, base_url=self.args.base_url)
 
     def load_session(self):
@@ -114,7 +137,6 @@ class MediatorBot:
         target_path = path or self.args.save_session
         if not target_path:
             return
-
         try:
             with open(target_path, "w", encoding="utf-8") as f:
                 json.dump(self.messages, f, ensure_ascii=False, indent=2)
@@ -122,36 +144,80 @@ class MediatorBot:
         except Exception as e:
             LOG.error(f"Failed to save session: {e}")
 
+    def _perform_web_search(self, query: str) -> str:
+        """Executes a DuckDuckGo search."""
+        try:
+            results = DDGS().text(query, max_results=3)
+            if not results:
+                return "No search results found."
+            # Format results into a string for the AI
+            formatted = "\n".join([f"- {r['title']}: {r['body']}" for r in results])
+            return formatted
+        except Exception as e:
+            return f"Search failed: {str(e)}"
+
     @retry(
         reraise=True,
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10),
         retry=retry_if_exception_type(Exception),
     )
-    def _call_api(self) -> str:
-        """Wraps the API call with tenacity for retries."""
+    def _get_completion(self, tools_available: bool = True):
+        """Calls the API, handling potential tool calls recursively."""
+        
+        # 1. Initial Request
         response = self.client.chat.completions.create(
             model=self.args.model,
             messages=self.messages,
             temperature=self.args.temperature,
             max_tokens=self.args.max_tokens,
+            tools=TOOLS if tools_available else None,
+            tool_choice="auto" if tools_available else None
         )
-        content = response.choices[0].message.content
-        return str(content).strip() if content else ""
+        
+        message = response.choices[0].message
+        
+        # 2. Check if the model wants to run a tool (Function Calling)
+        if message.tool_calls:
+            # Append the model's "intent" to call a tool to history
+            self.messages.append(message)
+            
+            for tool_call in message.tool_calls:
+                if tool_call.function.name == "web_search":
+                    # Parse arguments
+                    args = json.loads(tool_call.function.arguments)
+                    query = args.get("query")
+                    
+                    self.console.print(f"[dim italic]🔎 Researching: {query}...[/dim italic]")
+                    
+                    # Execute Search
+                    search_result = self._perform_web_search(query)
+                    
+                    # Append result to history
+                    self.messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": search_result
+                    })
+
+            # 3. Recursive Call: Get the final answer now that it has the info
+            return self._get_completion(tools_available=False) # Prevent infinite loops by disabling tools for follow-up
+
+        return str(message.content).strip()
 
     def get_ai_response(self):
-        """Handles the UI spinner and API call execution."""
+        """Handles the UI spinner and high-level logic."""
         try:
             with Progress(
                 SpinnerColumn(),
-                TextColumn("[bold cyan]Mediator is thinking...[/bold cyan]"),
+                TextColumn("[bold cyan]Mediator is thinking (and researching)...[/bold cyan]"),
                 transient=True,
                 console=self.console
             ) as progress:
                 progress.add_task("request", total=None)
-                reply = self._call_api()
+                reply = self._get_completion()
 
-            # Append and Display
+            # Append Final Answer and Display
             self.messages.append({"role": "assistant", "content": reply})
             
             self.console.print()
@@ -167,62 +233,61 @@ class MediatorBot:
         self.load_session()
         
         self.console.clear()
-        self.console.rule("[bold gold1]AI Legal Mediator[/bold gold1]")
+        self.console.rule("[bold gold1]AI Legal Mediator (Web-Enabled)[/bold gold1]")
         self.console.print("[italic]Type 'exit' to quit, '/save' to save, '/undo' to remove last message.[/italic]\n")
 
-        # Inject topic if provided via CLI and not already in history
+        # Inject topic if provided via CLI
         if self.args.topic and len(self.messages) == 1:
             topic_msg = f"Dispute Topic: {self.args.topic}"
             self.messages.append({"role": "user", "content": topic_msg})
             self.console.print(f"[bold]Topic Set:[/bold] {self.args.topic}")
-            # Get initial thoughts from mediator
             self.get_ai_response()
 
         try:
             while True:
-                # Determine color based on speaker
                 speaker_color = "green" if self.current_speaker == "Party A" else "magenta"
-                
                 user_input = Prompt.ask(f"[{speaker_color}]{self.current_speaker}[/{speaker_color}]").strip()
 
                 if not user_input:
                     continue
 
-                # --- Command Handling ---
                 if user_input.lower() in ["exit", "quit", "/quit"]:
                     break
                 
                 if user_input.lower() == "/save":
-                    if self.args.save_session:
-                        self.save_session()
-                    else:
-                        path = Prompt.ask("Enter filename to save")
-                        self.save_session(path)
+                    self.save_session()
                     continue
 
                 if user_input.lower() == "/undo":
                     if len(self.messages) > 1:
-                        removed = self.messages.pop()
-                        self.console.print(f"[dim]Removed message: {removed.get('content')[:50]}...[/dim]")
+                        # We need to be careful removing messages if the last turn involved tool calls
+                        # Simple approach: remove until we hit a user message again? 
+                        # For now, just pop the last assistant response + user input
+                        # (Note: In a complex tool chain, this might need more robust logic)
+                        self.messages.pop() # Assistant
+                        if self.messages and self.messages[-1].get("role") == "tool":
+                             self.messages.pop() # Tool result
+                        if self.messages and self.messages[-1].get("tool_calls"):
+                             self.messages.pop() # Tool call request
+                        if self.messages and self.messages[-1].get("role") == "user":
+                             self.messages.pop() # User original input
+                        
+                        self.console.print("[dim]Undid last turn.[/dim]")
                         # Switch turn back
                         self.current_speaker = "Party B" if self.current_speaker == "Party A" else "Party A"
                     else:
                         self.console.print("[red]Nothing to undo.[/red]")
                     continue
 
-                # --- Message Handling ---
                 self.messages.append({
                     "role": "user", 
                     "content": f"{self.current_speaker}: {user_input}"
                 })
 
-                # Get Mediator Response
                 self.get_ai_response()
 
-                # Toggle speaker
                 self.current_speaker = "Party B" if self.current_speaker == "Party A" else "Party A"
                 
-                # Auto-save if configured
                 if self.args.save_session:
                     self.save_session()
 
@@ -234,10 +299,8 @@ class MediatorBot:
                 self.save_session()
 
 
-# --- Main Entry Point ---
-
 def parse_args():
-    p = argparse.ArgumentParser(description="AI Legal Mediator Bot (xAI/Grok)")
+    p = argparse.ArgumentParser(description="AI Legal Mediator Bot (xAI/Grok + Web Search)")
     p.add_argument("--model", default=DEFAULT_MODEL, help=f"Model name (default: {DEFAULT_MODEL})")
     p.add_argument("--base-url", default=DEFAULT_BASE_URL, help=f"API Base URL (default: {DEFAULT_BASE_URL})")
     p.add_argument("--api-key", help="API Key (Prefer using XAI_API_KEY env var)")
@@ -245,5 +308,13 @@ def parse_args():
     p.add_argument("--save-session", help="Path to auto-save JSON session")
     p.add_argument("--load-session", help="Path to load existing JSON session")
     p.add_argument("--max-tokens", type=int, default=1000, help="Response length limit")
-    p.add_argument("--temperature", type=float, default=0.7, help="Creativity (0.0 - 1.0)")
+    p.add_argument("--temperature", type=float, default=0.5, help="Creativity (Lower for legal accuracy)")
     return p.parse_args()
+
+def main():
+    args = parse_args()
+    bot = MediatorBot(args)
+    bot.run()
+
+if __name__ == "__main__":
+    main()
