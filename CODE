@@ -2,222 +2,248 @@
 """
 mediator_bot.py
 
-Improved plug-and-play legal mediator bot compatible with xAI's Grok API (via the OpenAI-compatible client).
+A professional, interactive CLI legal mediator bot compatible with xAI's Grok API.
+
 Features:
-- CLI options for topic, model, base_url, api_key (env fallback)
-- Retry/backoff for API calls (tenacity)
-- Save/load session to JSON
-- Logging and graceful exits
+- Markdown rendering for clear, structured legal guidance.
+- Visual feedback (spinners, colors) for a better UX.
+- Robust session management (Save/Load/Autosave).
+- In-chat commands (/save, /undo, /quit).
+- Retry logic for network resilience.
 
-Dependencies:
-- openai (or the openai package you already use to call xAI)
-- tenacity
-
-Install dependencies:
-pip install openai tenacity
-
-Usage examples:
-# Interactive (prompts for topic and alternating parties)
-python mediator_bot.py
-
-# Non-interactive, supply topic and auto-save session
-python mediator_bot.py --topic "Landlord-tenant deposit dispute" --save-session session.json
-
-# Override model or base url
-python mediator_bot.py --model grok-4 --base-url https://api.x.ai/v1
+Usage:
+  python mediator_bot.py
+  python mediator_bot.py --topic "Contract Dispute" --save-session case_001.json
 
 Environment:
-Set XAI_API_KEY or provide --api-key (not recommended on shared shells):
-export XAI_API_KEY="sk-..."
+  export XAI_API_KEY="sk-..."
 """
+
 import argparse
 import json
 import logging
 import os
 import sys
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 
-import openai
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+# Third-party imports
+try:
+    import openai
+    from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+    from rich.console import Console
+    from rich.markdown import Markdown
+    from rich.panel import Panel
+    from rich.prompt import Prompt
+    from rich.logging import RichHandler
+    from rich.progress import Progress, SpinnerColumn, TextColumn
+except ImportError as e:
+    print(f"Missing dependency: {e.name}")
+    print("Please run: pip install openai tenacity rich")
+    sys.exit(1)
+
+# --- Configuration & Logging ---
 
 LOG = logging.getLogger("mediator_bot")
 LOG.setLevel(logging.INFO)
-handler = logging.StreamHandler()
-handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-LOG.addHandler(handler)
+LOG.addHandler(RichHandler(rich_tracebacks=True, show_time=False))
+
+DEFAULT_MODEL = "grok-beta" 
+DEFAULT_BASE_URL = "https://api.x.ai/v1"
+ENV_API_KEY = "XAI_API_KEY"
 
 SYSTEM_PROMPT = {
     "role": "system",
     "content": (
         "You are an impartial legal mediator AI. Your goal is to help resolve disputes fairly and neutrally. "
         "Listen to both parties, ask clarifying questions if needed, and suggest balanced resolutions based on "
-        "common legal principles (e.g., contract law, fairness, compromise). Do not give binding legal advice; "
-        "recommend consulting a human lawyer. Keep responses concise, empathetic, and constructive."
+        "common legal principles (e.g., contract law, fairness, compromise). "
+        "Formatting instructions:\n"
+        "- Use Markdown headers for main points.\n"
+        "- Use bullet points for lists.\n"
+        "- Do NOT give binding legal advice; explicitly recommend consulting a human lawyer.\n"
+        "- Keep responses concise, empathetic, and constructive."
     ),
 }
 
-DEFAULT_MODEL = "grok-4"
-DEFAULT_BASE_URL = "https://api.x.ai/v1"
-DEFAULT_API_ENV_VAR = "XAI_API_KEY"
+# --- The Mediator Class ---
 
+class MediatorBot:
+    def __init__(self, args: argparse.Namespace):
+        self.args = args
+        self.console = Console()
+        self.messages: List[Dict[str, str]] = []
+        self.client = self._build_client()
+        self.current_speaker = "Party A"
+
+    def _build_client(self) -> openai.OpenAI:
+        """Initializes the OpenAI client for xAI."""
+        api_key = self.args.api_key or os.getenv(ENV_API_KEY)
+        if not api_key:
+            self.console.print(f"[bold red]Error:[/bold red] {ENV_API_KEY} not found in environment or arguments.")
+            sys.exit(1)
+        
+        return openai.OpenAI(api_key=api_key, base_url=self.args.base_url)
+
+    def load_session(self):
+        """Loads conversation history from a file."""
+        if not self.args.load_session:
+            self.messages = [SYSTEM_PROMPT]
+            return
+
+        path = Path(self.args.load_session)
+        if path.exists():
+            try:
+                with path.open("r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        self.messages = data
+                        self.console.print(f"[green]✔ Loaded session from {path}[/green]")
+                    else:
+                        LOG.warning("Invalid session format. Starting fresh.")
+                        self.messages = [SYSTEM_PROMPT]
+            except Exception as e:
+                LOG.error(f"Failed to load session: {e}")
+                self.messages = [SYSTEM_PROMPT]
+        else:
+            LOG.warning(f"Session file {path} not found. Starting fresh.")
+            self.messages = [SYSTEM_PROMPT]
+
+    def save_session(self, path: Optional[str] = None):
+        """Saves conversation history to a file."""
+        target_path = path or self.args.save_session
+        if not target_path:
+            return
+
+        try:
+            with open(target_path, "w", encoding="utf-8") as f:
+                json.dump(self.messages, f, ensure_ascii=False, indent=2)
+            self.console.print(f"[dim]Saved session to {target_path}[/dim]")
+        except Exception as e:
+            LOG.error(f"Failed to save session: {e}")
+
+    @retry(
+        reraise=True,
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type(Exception),
+    )
+    def _call_api(self) -> str:
+        """Wraps the API call with tenacity for retries."""
+        response = self.client.chat.completions.create(
+            model=self.args.model,
+            messages=self.messages,
+            temperature=self.args.temperature,
+            max_tokens=self.args.max_tokens,
+        )
+        content = response.choices[0].message.content
+        return str(content).strip() if content else ""
+
+    def get_ai_response(self):
+        """Handles the UI spinner and API call execution."""
+        try:
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[bold cyan]Mediator is thinking...[/bold cyan]"),
+                transient=True,
+                console=self.console
+            ) as progress:
+                progress.add_task("request", total=None)
+                reply = self._call_api()
+
+            # Append and Display
+            self.messages.append({"role": "assistant", "content": reply})
+            
+            self.console.print()
+            self.console.print(Panel(Markdown(reply), title="[bold blue]Mediator[/bold blue]", border_style="blue"))
+            self.console.print()
+
+        except Exception as e:
+            LOG.exception("API Error")
+            self.console.print(f"[bold red]Error communicating with API:[/bold red] {e}")
+
+    def run(self):
+        """Main interactive loop."""
+        self.load_session()
+        
+        self.console.clear()
+        self.console.rule("[bold gold1]AI Legal Mediator[/bold gold1]")
+        self.console.print("[italic]Type 'exit' to quit, '/save' to save, '/undo' to remove last message.[/italic]\n")
+
+        # Inject topic if provided via CLI and not already in history
+        if self.args.topic and len(self.messages) == 1:
+            topic_msg = f"Dispute Topic: {self.args.topic}"
+            self.messages.append({"role": "user", "content": topic_msg})
+            self.console.print(f"[bold]Topic Set:[/bold] {self.args.topic}")
+            # Get initial thoughts from mediator
+            self.get_ai_response()
+
+        try:
+            while True:
+                # Determine color based on speaker
+                speaker_color = "green" if self.current_speaker == "Party A" else "magenta"
+                
+                user_input = Prompt.ask(f"[{speaker_color}]{self.current_speaker}[/{speaker_color}]").strip()
+
+                if not user_input:
+                    continue
+
+                # --- Command Handling ---
+                if user_input.lower() in ["exit", "quit", "/quit"]:
+                    break
+                
+                if user_input.lower() == "/save":
+                    if self.args.save_session:
+                        self.save_session()
+                    else:
+                        path = Prompt.ask("Enter filename to save")
+                        self.save_session(path)
+                    continue
+
+                if user_input.lower() == "/undo":
+                    if len(self.messages) > 1:
+                        removed = self.messages.pop()
+                        self.console.print(f"[dim]Removed message: {removed.get('content')[:50]}...[/dim]")
+                        # Switch turn back
+                        self.current_speaker = "Party B" if self.current_speaker == "Party A" else "Party A"
+                    else:
+                        self.console.print("[red]Nothing to undo.[/red]")
+                    continue
+
+                # --- Message Handling ---
+                self.messages.append({
+                    "role": "user", 
+                    "content": f"{self.current_speaker}: {user_input}"
+                })
+
+                # Get Mediator Response
+                self.get_ai_response()
+
+                # Toggle speaker
+                self.current_speaker = "Party B" if self.current_speaker == "Party A" else "Party A"
+                
+                # Auto-save if configured
+                if self.args.save_session:
+                    self.save_session()
+
+        except KeyboardInterrupt:
+            self.console.print("\n[bold red]Interrupted.[/bold red]")
+        finally:
+            self.console.print("\n[bold gold1]Session concluded.[/bold gold1]")
+            if self.args.save_session:
+                self.save_session()
+
+
+# --- Main Entry Point ---
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Plug-and-Play Legal Mediator Bot (xAI-compatible)")
-    p.add_argument("--model", default=DEFAULT_MODEL, help="Model to use (default: %(default)s)")
-    p.add_argument("--base-url", default=DEFAULT_BASE_URL, help="Base URL for API (default: %(default)s)")
-    p.add_argument("--api-key", default=None, help="API key (not recommended; prefer env var)")
-    p.add_argument("--topic", default=None, help="Dispute topic (if omitted, will ask interactively)")
-    p.add_argument("--save-session", default=None, help="Path to JSON file to save session after exit")
-    p.add_argument("--load-session", default=None, help="Path to JSON file to load previous session")
-    p.add_argument("--max-tokens", type=int, default=500, help="Max tokens for responses")
-    p.add_argument("--temperature", type=float, default=0.7, help="Temperature for responses")
+    p = argparse.ArgumentParser(description="AI Legal Mediator Bot (xAI/Grok)")
+    p.add_argument("--model", default=DEFAULT_MODEL, help=f"Model name (default: {DEFAULT_MODEL})")
+    p.add_argument("--base-url", default=DEFAULT_BASE_URL, help=f"API Base URL (default: {DEFAULT_BASE_URL})")
+    p.add_argument("--api-key", help="API Key (Prefer using XAI_API_KEY env var)")
+    p.add_argument("--topic", help="Initial dispute topic")
+    p.add_argument("--save-session", help="Path to auto-save JSON session")
+    p.add_argument("--load-session", help="Path to load existing JSON session")
+    p.add_argument("--max-tokens", type=int, default=1000, help="Response length limit")
+    p.add_argument("--temperature", type=float, default=0.7, help="Creativity (0.0 - 1.0)")
     return p.parse_args()
-
-
-def load_session(path: str) -> List[Dict]:
-    p = Path(path)
-    if not p.exists():
-        LOG.warning("Session file %s does not exist; starting new session.", path)
-        return []
-    try:
-        with p.open("r", encoding="utf-8") as fh:
-            data = json.load(fh)
-            if isinstance(data, list):
-                LOG.info("Loaded %d messages from session %s", len(data), path)
-                return data
-            else:
-                LOG.warning("Session file %s contains unexpected format. Starting fresh.", path)
-                return []
-    except Exception as e:
-        LOG.exception("Failed to load session %s: %s", path, e)
-        return []
-
-
-def save_session(path: str, messages: List[Dict]):
-    try:
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump(messages, fh, ensure_ascii=False, indent=2)
-        LOG.info("Saved session (%d messages) to %s", len(messages), path)
-    except Exception:
-        LOG.exception("Failed to save session to %s", path)
-
-
-@retry(
-    reraise=True,
-    stop=stop_after_attempt(5),
-    wait=wait_exponential(multiplier=1, min=1, max=30),
-    retry=retry_if_exception_type(Exception),
-)
-def call_mediation_api(client: openai.OpenAI, model: str, messages: List[Dict], temperature: float, max_tokens: int) -> str:
-    """
-    Call the model with exponential backoff retries on exceptions.
-    """
-    # The xAI-compatible client in your snippet uses client.chat.completions.create(...)
-    # Keep the same call pattern and guard access carefully.
-    response = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )
-    # Expected shape: response.choices[0].message.content
-    try:
-        content = response.choices[0].message.content
-        if isinstance(content, str):
-            return content.strip()
-        # Some clients may return slightly different structure
-        return str(content).strip()
-    except Exception as e:
-        LOG.exception("Unexpected response shape from API: %s", e)
-        # Dump response for debugging (not including API keys)
-        try:
-            LOG.debug("Full response object: %s", response)
-        except Exception:
-            pass
-        raise
-
-
-def build_client(api_key: Optional[str], base_url: str) -> openai.OpenAI:
-    # Prefer explicit api_key argument, else from env
-    key = api_key or os.getenv(DEFAULT_API_ENV_VAR)
-    if not key:
-        LOG.error("No API key provided. Set %s or pass --api-key.", DEFAULT_API_ENV_VAR)
-        sys.exit(2)
-    # Create client instance. The openai package is used here as in your original snippet.
-    client = openai.OpenAI(api_key=key, base_url=base_url)
-    return client
-
-
-def interactive_loop(client: openai.OpenAI, messages: List[Dict], model: str, temperature: float, max_tokens: int, save_session_path: Optional[str]):
-    LOG.info("Starting interactive mediator. Type 'exit' or Ctrl-C to quit.")
-    print("Notice: This mediator provides informational suggestions only and is not a substitute for legal advice.\n")
-    party = "A"
-    try:
-        while True:
-            prompt = input(f"Party {party}: ").strip()
-            if not prompt:
-                # ignore empty input
-                continue
-            if prompt.lower() in {"exit", "quit"}:
-                LOG.info("Exit requested.")
-                break
-
-            # Append party message
-            user_role = {"role": "user", "content": f"Party {party}: {prompt}"}
-            messages.append(user_role)
-
-            # Call API
-            try:
-                reply = call_mediation_api(client, model, messages, temperature=temperature, max_tokens=max_tokens)
-            except KeyboardInterrupt:
-                raise
-            except Exception as e:
-                LOG.exception("API call failed: %s", e)
-                print("Mediator (error): Could not reach API. Try again or exit.")
-                # attach an assistant message describing the error
-                messages.append({"role": "assistant", "content": f"[Error communicating with API: {e}]"})
-                party = "B" if party == "A" else "A"
-                continue
-
-            print(f"Mediator: {reply}\n")
-            messages.append({"role": "assistant", "content": reply})
-
-            party = "B" if party == "A" else "A"
-    except (KeyboardInterrupt, EOFError):
-        print("\nExiting.")
-    finally:
-        if save_session_path:
-            save_session(save_session_path, messages)
-
-
-def main():
-    args = parse_args()
-
-    # Build or load session
-    messages: List[Dict] = []
-    if args.load_session:
-        messages = load_session(args.load_session)
-    if not messages:
-        messages = [SYSTEM_PROMPT]
-
-    # If topic provided via CLI, add as the first user message (only if not loaded)
-    if args.topic:
-        messages.append({"role": "user", "content": f"Dispute topic: {args.topic}"})
-
-    # Build client
-    client = build_client(args.api_key, args.base_url)
-
-    # Run interactive loop (we intentionally keep the simple alternate-party flow)
-    interactive_loop(
-        client=client,
-        messages=messages,
-        model=args.model,
-        temperature=args.temperature,
-        max_tokens=args.max_tokens,
-        save_session_path=args.save_session,
-    )
-
-
-if __name__ == "__main__":
-    main()
