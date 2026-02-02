@@ -1,41 +1,56 @@
-# Legal Mediator Bot – README  
-`mediator_bot.py`
+# ⚖️ AI Legal Mediator CLI
 
-A robust, plug-and-play AI-powered legal mediator that uses **xAI’s Grok models** via the OpenAI-compatible API.
+A professional, interactive command-line tool that uses **xAI's Grok** (via the OpenAI-compatible API) to simulate an impartial legal mediator.
 
-Perfect for quick testing, demos, dispute-resolution prototypes, or integration into larger ADR platforms.
+This bot facilitates disputes between two parties ("Party A" and "Party B") by listening to arguments, asking clarifying questions, and suggesting resolutions based on common legal principles—all rendered in a beautiful, readable terminal interface.
 
-### Features
-- One-file, zero-config start (just set your API key)
-- CLI arguments for model, topic, temperature, session save/load
-- Automatic retry with exponential backoff (`tenacity`)
-- Session persistence to JSON (continue conversations later)
-- Proper logging and graceful error handling
-- Works with `grok-4`, `grok-3` or any future xAI model
+## ✨ Features
 
-### Requirements
+* **Rich Terminal UI:** Uses the `rich` library for colored output, loading spinners, and properly rendered Markdown (headers, lists, bold text) for AI responses.
+* **Session Management:** Save your mediation to a JSON file and resume it later.
+* **In-Chat Commands:** Use `/undo` to revert mistakes and `/save` to snapshot the conversation mid-stream.
+* **Network Resilience:** Built-in retry logic (via `tenacity`) handles API timeouts or temporary connection glitches gracefully.
+* **Flexible Configuration:** Compatible with xAI (Grok), OpenAI, or any other OpenAI-compatible endpoint.
+
+## 🛠️ Requirements
+
+* Python 3.8 or higher
+* An API Key from [xAI Console](https://console.x.ai/)
+
+**Install dependencies:**
+
 ```bash
 pip install openai tenacity rich
+
 ```
 
-### Quick Start
+## 🚀 Quick Start
 
-1. **Get your xAI API key**  
-   → https://console.x.ai
+1. **Get your xAI API key** → [https://console.x.ai](https://console.x.ai)
+2. **Set the key (recommended)** *Linux/macOS:*
+```bash
+export XAI_API_KEY="sk-..."
 
-2. **Set the key (recommended)**
-   ```bash
-   export XAI_API_KEY="sk-..."
-   ```
+```
+
+
+*Windows (PowerShell):*
+```powershell
+$env:XAI_API_KEY="sk-..."
+
+```
+
 
 3. **Run the mediator**
-   ```bash
-   python mediator_bot.py
-   ```
+```bash
+python mediator_bot.py
 
-   You’ll be prompted for the dispute topic, then alternate between **Party A** and **Party B**.
+```
 
-### Common Usage Examples
+
+You’ll be prompted for the dispute topic, then alternate between **Party A** and **Party B**.
+
+## 📖 Usage Examples
 
 ```bash
 # Basic interactive session
@@ -48,46 +63,63 @@ python mediator_bot.py --topic "Neighbor fence encroachment dispute" --save-sess
 python mediator_bot.py --load-session fence_case.json
 
 # Use a different model or temperature
-python mediator_bot.py --model grok-4 --temperature 0.5 --max-tokens 800
+python mediator_bot.py --model grok-beta --temperature 0.5 --max-tokens 800
 
 # Override base URL (useful for proxies or future endpoints)
 python mediator_bot.py --base-url https://api.x.ai/v1
+
 ```
 
-### All Command-Line Options
+## 🎮 In-Chat Commands
 
-| Option              | Description                                      | Default          |
-|---------------------|--------------------------------------------------|------------------|
-| `--model`           | Model name                                       | `grok-4`         |
-| `--base-url`        | API base URL                                     | `https://api.x.ai/v1` |
-| `--api-key`         | API key (not recommended; use env var instead)   | `None`           |
-| `--topic`           | Dispute topic (skips interactive prompt)         | `None`           |
-| `--save-session`    | JSON file to save session on exit                | `None`           |
-| `--load-session`    | JSON file to load previous conversation          | `None`           |
-| `--max-tokens`      | Maximum tokens per response                      | `500`            |
-| `--temperature`     | Sampling temperature (0.0–1.0)                    | `0.7`            |
+While the bot is running, you can type these commands instead of a message:
 
-### Session File Format (JSON)
-The saved JSON is a simple list of OpenAI-compatible message objects, e.g.:
+| Command | Description |
+| --- | --- |
+| `/undo` | Removes the last message (and the bot's response) so you can rephrase. |
+| `/save` | Manually triggers a save to the session file. |
+| `/quit` | Exits the application (saves automatically if `--save-session` is active). |
+| `exit` | Same as `/quit`. |
+
+## ⚙️ All Command-Line Options
+
+| Option | Description | Default |
+| --- | --- | --- |
+| `--model` | Model name | `grok-beta` |
+| `--base-url` | API base URL | `https://api.x.ai/v1` |
+| `--api-key` | API key (not recommended; use env var instead) | `None` |
+| `--topic` | Dispute topic (skips interactive prompt) | `None` |
+| `--save-session` | JSON file to save session on exit | `None` |
+| `--load-session` | JSON file to load previous conversation | `None` |
+| `--max-tokens` | Maximum tokens per response | `1000` |
+| `--temperature` | Sampling temperature (0.0–1.0) | `0.7` |
+
+## 💾 Session File Format (JSON)
+
+The saved JSON is a simple list of OpenAI-compatible message objects. You can edit, version-control, or feed these files into other tools.
 
 ```json
 [
   {"role": "system", "content": "..."},
-  {"role": "user", "content": "Dispute topic: ..."},
-  {"role": "user", "content": "Party A: ..."},
-  {"role": "assistant", "content": "Mediator: ..."}
+  {"role": "user", "content": "Dispute topic: Neighbor fence encroachment"},
+  {"role": "user", "content": "Party A: He built 3 inches over the line."},
+  {"role": "assistant", "content": "Mediator: I understand. Party B, how do you respond?"}
 ]
+
 ```
 
-You can edit, version-control, or feed these files into other tools.
+## ⚠️ Important Disclaimers
 
-### Important Disclaimers
-- This tool is **not** a licensed attorney or certified mediator.
-- All suggestions are informational only.
-- Always recommend parties consult qualified legal professionals for binding advice.
+* **Not Legal Advice:** This tool is **not** a licensed attorney or certified mediator.
+* **Informational Only:** All suggestions are informational only and based on general patterns in data.
+* **Consult Professionals:** Always recommend parties consult qualified legal professionals for binding advice.
 
-### License
-MIT – feel free to modify, extend, or integrate into open-source projects. 
-For commercial use, contact the dev at tonyelias2012@gmail.com for further discussions (Failure to receive exclusive permission from the developer for commercial use of this bot will result in legal action being taken).
+## 📄 License
+
+**MIT License (Open Source Use Only)** Feel free to modify, extend, or integrate into open-source projects.
+
+**Commercial Restriction:** For commercial use, contact the developer at **tonyelias2012@gmail.com** for further discussions.
+
+> **Note:** Failure to receive exclusive permission from the developer for commercial use of this bot will result in legal action being taken.
 
 Enjoy mediating!
